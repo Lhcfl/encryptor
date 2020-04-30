@@ -101,7 +101,12 @@ std::string ch32(const char* head, bool res=false) {
 inline char modechar(bool password = false, bool res = false, bool MD5open = false, bool rndchr = false, bool chrnum = 1) {
 	return intc[password | (res<<1) | (MD5open<<2) | (rndchr<<3) | (chrnum<<4)];
 }
-std::string incode(std::string text, char mode) {
+
+inline char merge_char(char a, char b) {
+	return intc[(cint[a] ^ cint[b]) & 63];
+}
+
+std::string incode(std::string text, char mode, std::string pswd = "") {
 	// 密文形式：
 	// [1字节格式码][MD5校验区][随机char区][密文区]
 	// 其中， 只有随机char区和密文区是受到密码保护的
@@ -121,12 +126,6 @@ std::string incode(std::string text, char mode) {
 		string codeMD5 = md5::getMD5(text);
 		ret += codeMD5;
 	}
-	// 随机填充
-	if (rndchr) {
-		for (int i = 1; i <= (chrnum+1)*16; i++) {
-			rnd += intc[rand()%64];
-		}
-	}
 	// 密文生成
 	int len = text.length();
 	for (int i = 0; i < len;) {
@@ -143,10 +142,40 @@ std::string incode(std::string text, char mode) {
 		i += 3;
 			
 	}
+	//rnd加密
+	if (rndchr) {
+		for (int i = 1; i <= (chrnum+1)*16; i++) {
+			rnd += intc[rand()%64];
+		}
+		string rnd_code = incode(rnd, modechar(0,0,0,0,0));
+		//自我迭代
+		for (int i = 1; i <= (chrnum+1)*16; i++) {
+			rnd_code = incode(rnd_code, modechar(0,0,0,0,0));
+		}
+		int code_len =  code.length(), rnd_code_len = rnd_code.length();
+		//cout << "rnd_code_len is :" << rnd_code_len << endl;
+		for (int i = 0; i < code_len; i++) {
+			code[i] = merge_char(rnd_code[i%rnd_code_len], code[i]);
+		}
+	}
+	//密码处理
+	if (openpswd) {
+		string pswd_code = incode(pswd, modechar(0,0,0,0,0));
+		//自我迭代
+		int code_len =  code.length();
+		while (pswd_code.length() < code_len && pswd_code.length() < 1e7) {
+			pswd_code = incode(pswd_code, modechar(0,0,0,0,0));
+		}
+		int pswd_code_len = pswd_code.length();
+		//cout << "pswd_code_len is :" << pswd_code_len << endl;
+		for (int i = 0; i < code_len; i++) {
+			code[i] = merge_char(pswd_code[i%pswd_code_len], code[i]);
+		}
+	}
 	return ret+rnd+code;
 }
 
-std::string decode(std::string text, std::string pswd = "") {
+std::string decode(std::string text, int& successcode, std::string pswd = "") {
 	// 密文形式：
 	// [1字节格式码][MD5校验区][随机char区][密文区]
 	// 其中， 只有随机char区和密文区是受到密码保护的
@@ -154,7 +183,7 @@ std::string decode(std::string text, std::string pswd = "") {
 	int p = 1;
 	//p means pointer: the location of this string.
 	// 初始化
-	string ret = "", rnd, codeMD5;
+	string ret = "", rnd="", codeMD5;
 	// 模式解析
 	bool openpswd = false, res = false, MD5open = false, rndchr = false, chrnum = 1;
 	int mode = cint[text[0]];
@@ -167,8 +196,34 @@ std::string decode(std::string text, std::string pswd = "") {
 	if (MD5open) {
 		for (int i = 0; i < 32; i++) codeMD5 += text[p++];
 	}
-	// 随机填充
-	
+	// 随机解析
+	if (rndchr) {
+		for (int i = 1; i <= (chrnum+1)*16; i++) rnd += text[p++];
+		string rnd_code = incode(rnd, modechar(0,0,0,0,0));
+		//自我迭代
+		for (int i = 1; i <= (chrnum+1)*16; i++) {
+			rnd_code = incode(rnd_code, modechar(0,0,0,0,0));
+		}
+		int code_len =  text.length(), rnd_code_len = rnd_code.length();
+		//cout << "rnd_code_len is :" << rnd_code_len << endl;
+		for (int i = 0; i + p < code_len; i++) {
+			text[i+p] = merge_char(rnd_code[i%rnd_code_len], text[i+p]);
+		}
+	}
+	// 密码解析
+	if (openpswd) {
+		string pswd_code = incode(pswd, modechar(0,0,0,0,0));
+		//自我迭代
+		int code_len = text.length();
+		while(pswd_code.length() < code_len - p && pswd_code.length() < 1e7) {
+			pswd_code = incode(pswd_code, modechar(0,0,0,0,0));
+		}
+		int pswd_code_len = pswd_code.length();
+		//cout << "pswd_code_len is :" << pswd_code_len << endl;
+		for (int i = 0; i + p < code_len; i++) {
+			text[i+p] = merge_char(pswd_code[i%pswd_code_len], text[i+p]);
+		}
+	}
 	// 明文生成
 	int len = text.length();
 	while (p < len) {
@@ -177,6 +232,10 @@ std::string decode(std::string text, std::string pswd = "") {
 		p += 4;
 	}
 	//MD5验证
+	successcode = 1;
+	if (MD5open && codeMD5 != md5::getMD5(ret.c_str())) {
+		successcode = 0;
+	}
 	return ret;
 }
 
@@ -185,7 +244,11 @@ int main() {
 	std::string s;
 	//cout << chff64("abc") << endl;
 	//cout << ch256(chff64("abc").c_str()) << endl;
-    cout << (s = incode("hello, world", modechar(0,0,1,0,0))) << endl;
-	cout << decode(s) << endl;
+	cin >> s;
+	cout << md5::getMD5(s) << endl;
+    cout << (s = incode(s, modechar(1,0,1,1,1), "donotdieda")) << endl;
+	int a = 0;
+	cout << decode(s, a, "donotdieda").c_str() << endl;
+	cout << (a==0?"N":"Y")<<endl;
     return 0;
 }
